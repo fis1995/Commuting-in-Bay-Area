@@ -1,0 +1,468 @@
+---
+title: "Commuting in the Bay Area"
+author: "Francine Stephens"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=F, warning=F, message=F}
+knitr::opts_chunk$set(echo = F)
+
+packages <- c(
+              "tidyverse",
+              "sf",
+              "ggplot2",
+              "plotly",
+              "tigris",
+              "leaflet",
+              "RColorBrewer", 
+              "censusapi", 
+              "tidycensus", 
+              "corrplot", 
+              "stargazer",
+              "ggiraphExtra"
+              )
+lapply(packages, library, character.only = T)
+
+setwd("~/Stanford/Commuting-in-Bay-Area")
+
+```
+
+## Does the time spent commuting to work fall with income? 
+
+
+# Introduction
+---
+Commute time to work is on the rise for workers in the U.S.  Consequently, super-commuting or extreme commuting, defined as traveling 90 minutes or more each day to work, has emerged as a complex social problem.  An [analysis from Census data](https://www.apartmentlist.com/research/increase-in-long-super-commutes) has established that the share of super commuters increased 15.9 percent from 2.4 percent in 2005 to 2.8 percent in 2016. Prior research has largely portrayed the rise in super-commuting as a product of shifting employment centers and housing markets. According to [a 2013 report from the U.S. Census Bureau](https://www.census.gov/content/dam/Census/library/working-papers/2013/demo/SEHSD-WP2013-03.pdf), super-commuting is most prevalent in America's major metros and mega-regions. These regions have experienced the growth of job centers followed by growth in population and rising home prices in urbanized central business districts and areas around job centers, thus shifting many workers who are lower income and cannot afford homes in urban centers to the live in less more suburbanized or exurbanized areas of metro areas or outside of metro areas. [NYU's Rudin Center for Transportation](https://wagner.nyu.edu/files/rudincenter/supercommuter_report.pdf)
+
+The implication of this research is that there is a connection between super-commuting and income. Indeed, the prior research referenced above indicates that lower-income workers are the vast majority of super-commuters. However, this research obscures the fact that affluent residential migration has actually been bifurcated. Not only are affluent people moving "back to the city", they are also moving away from cities to the peripheries of the suburbs and into exurbs. In the late 2000s and through the 2010s, the uptick in movement to outer suburbs and exurbs occurred. [Frey, Brooking's Institution, 2018](https://www.brookings.edu/blog/the-avenue/2018/03/26/us-population-disperses-to-suburbs-exurbs-rural-areas-and-middle-of-the-country-metros/) If this is the case, then super-commuting would be less connected to income and potentially also reflective of lifestyle choices (e.g., "living in the country and away from the bustle of the big city). 
+
+The purpose of this analysis is to address these more recent residential patterns and test how strongly connected income is to commuting. For this analysis, I will focus on the Bay Area, where housing prices have skyrocketed in both the cities and in the suburbs, and the population has grown in the outer-suburbs and exurbs. In the following analyses, I run  a series of regressions to test whether income is strongly predictive of commute times. The regression models also take into account use of public transportation in commute to work and the share of workers. The [NYU report](https://wagner.nyu.edu/files/rudincenter/supercommuter_report.pdf) finds that the availability and quality of public transportation service impacts the amount of super-commuters in an area, with plentiful and high quality service being associated with less super-commuting. In the Bay Area, there appears to be a [gendered pattern of super-commuting](https://bayareaequityatlas.org/indicators/extreme-commuting#/), with women bearing the burden of extreme commutes. This is likely because women tend to be occupationally segregated into care and service work, which tend to be lower paying and would limit female workers' ability to live near their places of work in the urbanized areas of the Bay Area.
+
+# Data and Analytic Plan
+---
+
+**Data Sources**
+Regression model 1 uses 2018 5-year PUMS data at the individual-level for PUMA geographies. Regression model 2 scales up to household-level data from the 2018 5-year ACS data at the census tract level. Regression model 2 will enable a comparison of the commuting-income relationship between ecological levels - individual and household. Regression model 3 replicates model 2, but uses data from the 2010 5-year ACS estimates. Model 3 will allow for a comparison over time to see if the relationship between commuting and income has changed since the start of the decade. 
+
+Efforts have been made to keep measures as similar as possible across all three regression models. The outcome variable shifts from minutes traveled to work in model 1 to percentage of super-commuter households, defined as commuting 90 minutes or more to work in models 2 and 3. Additionally, public transportation is defined differently in the PUMS and ACS-tract level data. The PUMS data includes taxi tranportation as part of public transportation, whereas the ACS does not. This difference does not seem to be a serious issue, however, future analysis could run a sensitivity analysis to see how results may differ under different measures of public transportation.
+
+```{r Parameters for Data Import and Cleaning}
+# SET PARAMETERS
+Sys.setenv(CENSUS_KEY="99ccb52a629609683f17f804ca875115e3f0804c")
+
+bay_county_names <-
+  c(
+    "Alameda",
+    "Contra Costa",
+    "Marin",
+    "Napa",
+    "San Francisco",
+    "San Mateo",
+    "Santa Clara",
+    "Solano",
+    "Sonoma"
+  )
+
+```
+
+``` {r PUMS data save, eval = F}
+# IMPORT DATASETS
+pums_vars_2018 <- 
+  pums_variables %>%
+  filter(year == 2018, survey == "acs5")
+
+saveRDS(pums_vars_2018, "pums_vars_2018.rds")
+
+ca_pums <- get_pums(
+  variables = c(
+    "PUMA",
+    "JWMNP",
+    "JWTR",
+    "PINCP",
+    "SEX",
+    "PWGTP"
+  ),
+  state = "CA",
+  year = 2018,
+  survey = "acs5",
+  recode = T
+)
+saveRDS(ca_pums, "ca_pums.rds")
+
+```
+
+**Measures for PUMS 2018 Data**
+
+* **Analytic Sample:** People in the labor force (i.e., over age 16). 
+* **Outcome: Minutes traveled to work each day.**
+* **Independent Variables:**
+  + *Annual Personal Income* - Transformed to thousands of dollars. 
+  + *Worker uses public transportation* - Transformed to a dummy variable to represent workers who use a mode of public transportation. As stated above, this dataset also treats taxicabs as public transportation.
+  + *Worker is a Female* - Dummy variable to represent that the worker is a woman.
+  
+``` {r PUMS data preparation, warning=F, message=F}
+pums_vars_2018 <- readRDS("pums_vars_2018.rds")
+
+ca_pums <- readRDS("ca_pums.rds")
+
+
+ca_pumas <-
+  pumas("CA", cb = T, progress_bar = F)
+
+bay_counties <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  filter(NAME %in% bay_county_names)
+
+bay_pumas <-
+  ca_pumas %>% 
+  st_centroid() %>% 
+  .[bay_counties, ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(ca_pumas %>% select(GEOID10)) %>% 
+  st_as_sf()
+
+bay_pums <-
+  ca_pums %>% 
+  filter(PUMA %in% bay_pumas$PUMACE10)
+
+bay_pums_mr <- 
+  bay_pums %>%
+  filter(JWTR != "bb", PINCP >= 0) %>%
+  mutate(JWTR = as.numeric(JWTR),
+         public_transport = ifelse(
+           JWTR %in% (2:7),
+           1,
+           0),
+         female_worker = ifelse(
+           SEX == 2,
+           1,
+           0), 
+         income_thousands = PINCP/1000
+         ) %>%
+  select(PWGTP,
+         commute_to_work_min = "JWMNP",
+         income_thousands,
+         public_transport,
+         female_worker
+         ) %>%
+  filter(
+         !is.na(income_thousands),
+         !is.na(public_transport), 
+         !is.na(female_worker)
+         ) 
+
+```
+
+**Measures for ACS 2010 & 2018 Household-Level Data**
+
+The measures in these two datasets were operationalized in the same way, which is a plus for this analysis and making comparisons. The components of the analytic plan hashed out here apply to both datasets.
+
+* **Analytic Sample:** Household respondent is in the labor force (i.e., over age 16).
+* **Outcome: Share of households that are super-commuters.** Given the definition of super-commuters cited in the introduction, this measure is operationalized as the share of households traveling at least 90 minutes to work each day. 
+* **Independent Variables:**
+  + *Share of Affluent Households* - Measured as the proportion of households with an annual income of at least $100 thousand. This is approximately four times the federal poverty level - one way of defining affluence by federal statistical agencies.
+  + *Share of workers uses public transportation* - This is the proportion of households with workers who use public transportation. Taxi-cabs are not considered public transportation in this dataset.
+  + *Share of female workers* - This is the proprtion of households with female workers.
+  
+```{r ACS-2018 tract data}
+# ACS-2018 Tract Data Prep
+acs_vars_2018_5yr <- readRDS("acs_vars_2018_5yr.rds")
+
+bay_tract_2018_mr <- 
+  getCensus(
+    name = "acs/acs5",
+    vintage = 2018,
+    region = "tract:*",
+    regionin = "state:06+county:001,013,041,055,075,081,085,095,097",
+    vars = c(
+      "B08303_001E",
+      "B08303_013E",
+      "B19001_001E",
+      "B19001_014E",
+      "B19001_015E",
+      "B19001_016E",
+      "B19001_017E",
+      "B08006_001E",
+      "B08006_035E",
+      "B08301_001E",
+      "B08301_010E"
+    )
+  ) %>% 
+  transmute(
+    tract = paste0(state, county, tract),
+    percent_super_commuters = (B08303_013E / B08303_001E),
+    percent_over100k = ((B19001_014E + B19001_015E + B19001_016E + B19001_017E) / B19001_001E),
+    percent_female_workers = (B08006_035E /B08006_001E),
+    percent_using_public_transit = (B08301_010E / B08301_001E)
+  ) %>% 
+  filter(
+    !is.na(percent_over100k), 
+    !is.na(percent_female_workers),
+    !is.na(percent_using_public_transit)
+  )
+
+```
+
+```{r ACS-2010 tract download, eval = F, include = F}
+acs_vars_2010_5yr <-
+  listCensusMetadata(
+    name = "2010/acs/acs5",
+    type = "variables"
+  )
+saveRDS(acs_vars_2010_5yr, "acs_vars_2010_5yr.rds")
+```
+
+```{r ACS-2010 tract data}
+# ACS-2010 Tract Data Prep
+acs_vars_2010_5yr <- readRDS("acs_vars_2010_5yr.rds")
+
+bay_tract_2010_mr <- 
+  getCensus(
+    name = "acs/acs5",
+    vintage = 2010,
+    region = "tract:*",
+    regionin = "state:06+county:001,013,041,055,075,081,085,095,097",
+    vars = c(
+      "B08303_001E",
+      "B08303_013E",
+      "B19001_001E",
+      "B19001_014E",
+      "B19001_015E",
+      "B19001_016E",
+      "B19001_017E",
+      "B08006_001E",
+      "B08006_035E",
+      "B08301_001E",
+      "B08301_010E"
+    )
+  ) %>% 
+  transmute(
+    tract = paste0(state, county, tract),
+    percent_super_commuters = (B08303_013E / B08303_001E),
+    percent_over100k = ((B19001_014E + B19001_015E + B19001_016E + B19001_017E) / B19001_001E),
+    percent_female_workers = (B08006_035E /B08006_001E),
+    percent_using_public_transit = (B08301_010E / B08301_001E)
+  ) %>% 
+  filter(
+    !is.na(percent_over100k), 
+    !is.na(percent_female_workers),
+    !is.na(percent_using_public_transit)
+  )
+
+```
+
+# Descriptive Statistics & Visuals
+---
+
+**Summary Statistics**
+
+Table 1 shown below features the descriptive statistics of workers in the Bay Area in 2018. 
+```{r descriptive stats, include = F}
+
+bay_pums_commute <- bay_pums_mr %>%
+  select(commute_to_work_min) %>%
+  summarize(`Sample Size` = n(),
+            Mean = mean(commute_to_work_min, na.rm = T),
+            `St. Dev` = sd(commute_to_work_min, na.rm = T),
+            Min = min(commute_to_work_min),
+            Max = max(commute_to_work_min)) %>%
+  mutate(Variable = "Commute to Work in Minutes")
+
+bay_pums_inc <- bay_pums_mr %>%
+  select(income_thousands) %>%
+  summarize(`Sample Size` = n(),
+            Mean = mean(income_thousands, na.rm = T), 
+            `St. Dev` = sd(income_thousands, na.rm = T),
+            Min = min(income_thousands),
+            Max = max(income_thousands)) %>%
+  mutate(Variable = "Annual Income in Thousands")
+
+bay_pums_transport <- bay_pums_mr %>%
+  select(public_transport) %>%
+  summarize(`Sample Size` = n(),
+            Total = sum(public_transport, na.rm = T),
+            Percent = (Total/n())*100) %>%
+  mutate(Variable = "Workers Commuting via Public Transportation")
+         
+bay_pums_fem_workers <- bay_pums_mr %>%
+  select(female_worker) %>%
+  summarize(`Sample Size` = n(),
+            Total = sum(female_worker, na.rm = T),
+            Percent = (Total/n())*100) %>%
+  mutate(Variable = "Female Workers")
+
+bay_pums_descriptives <- rbind(bay_pums_commute,
+                               bay_pums_inc) %>%
+  add_column(Total = NA,
+             Percent = NA)
+
+bay_pums_perc <- rbind(bay_pums_transport,
+                       bay_pums_fem_workers) %>% 
+  add_column(Mean = NA,
+         "St. Dev" = NA,
+         Min = NA, 
+         Max = NA) 
+
+bay_pums_descriptives2 <- rbind(bay_pums_descriptives,
+      bay_pums_perc) %>%
+  relocate(Variable, .before = `Sample Size`) %>%
+  mutate_if(is.numeric, round, digits =2) %>%
+  select(-Total)
+
+bay_tract_2018_sum <- bay_tract_2018_mr %>%
+  select(-tract) 
+
+bay_tract_2018_sum1 <- do.call(data.frame, 
+           list(mean = apply(bay_tract_2018_sum, 2, mean),
+                sd = apply(bay_tract_2018_sum, 2, sd),
+                min = apply(bay_tract_2018_sum, 2, min),
+                max = apply(bay_tract_2018_sum, 2, max),
+                n = apply(bay_tract_2018_sum, 2, length)))
+
+
+bay_tract_2018_sum2 <- bay_tract_2018_sum1 %>%
+  rownames_to_column(var = "Variable") %>%
+  rename(`Sample Size` = n) %>%
+  mutate(Mean = mean * 100,
+         `St. Dev` = sd * 100,
+         Min = min * 100,
+         Max = max * 100) %>%
+  select(-mean, -sd, -min, -max) %>%
+  mutate_if(is.numeric, round, digits =2) %>%
+  mutate(Variable = (gsub("_", " ", Variable)))
+ 
+```  
+
+*Table 1: Descriptive Statistics of PUMS Analytic Sample*
+``` {r descriptive stats PUMS}
+#Table 1
+rmarkdown::paged_table(bay_pums_descriptives2)  
+
+```
+
+The average commute time for Bay Area residents is about 30 minutes, but the variation in commute time is quite large. On the high-end, residents travel just under 2 hours to get to work. The average personal income in the Bay Area is $86,000, however the variation is quite large for this measure too. Just under 12% of the residents use public transportation to commute to their place of work. Lastly, female workers make up about 47% of the the active labor force in the region.
+
+*Table 2: Descriptive Statistics of ACS-2018 Census Tract Analytic Sample*
+``` {r summary stat 2018 tracts}
+# Table 2
+rmarkdown::paged_table(bay_tract_2018_sum2)
+
+```
+
+
+The average share of super-commuters in the ACS household-level dataset is 4%. On the upper-end, there is a census-tract, neighborhood where about 27% of the households have super-commuters. The average share of workers using public transportation also mirrors the PUMS analytic sample at nearly 12%. Noticeably, there are some tracts where the majority of households utilize public transportation. On average, the share of households with over 100K annual income is nearly 50%. 
+
+**Correlation Plot for Individual Level PUMS Data**
+
+The correlation plot for PUMS shows commuting has a moderate positive correlation with using public transportation (r = 0.32). Outside of that, the correlations are much weaker. Income has nearly a 0 correlation with commuting time. The ACS tract-level data has nearly zero correlations for all variables. 
+
+``` {r correlation pums, warning=F, message=F}
+# ACS-Tract 2018 Correlations
+bay_pums_corr <- bay_pums_mr %>%
+  select(-PWGTP) %>%
+  cor()
+
+corrplot(
+  bay_pums_corr, 
+  method = "number",
+  type = "upper"
+)
+```
+
+
+# Scatter plot of Super-Commuting & Household Income 
+---
+
+The graph shows a very weak, negative (almost null) relationship between household income and super-commuter households in the Bay. The prediction line is almost flat. This is weak evidence supporting the prior research that found a negative correlation between income and super-commuting. Even in neighborhoods with about 50% to 70% of affluent households there are more than 1.5% of households with super commuters. 
+
+```{r graph, warning=F, message=F}
+ggplot(
+  data = bay_tract_2018_mr,
+  aes(
+      x = percent_over100k,
+      y = percent_super_commuters
+    )
+) +
+  geom_point(
+    color="orange",
+    fill="#69b3a2") +
+  geom_smooth(method = "lm") +
+  labs(
+    x = "Proportion of Households Earning Over 100K Annually",
+    y = "Proportion of Super Commuter Households",
+    title = "Figure 1: Super-Commuting and Household Income",
+    subtitle = "SF Bay Area, 2018",
+    caption = "Source: ACS-2018 Tract-Level 5-year estimates"
+  ) + theme_bw()
+
+```
+
+
+
+# Regression Models
+---
+
+``` {r regression models, echo = T}
+# Regression Models
+model1 <- 
+  lm(commute_to_work_min ~
+       income_thousands + 
+       public_transport + 
+       female_worker,
+       data =bay_pums_mr,
+       weights = PWGTP)
+
+model2 <- 
+  lm(percent_super_commuters ~ 
+       percent_over100k + 
+       percent_female_workers + 
+       percent_using_public_transit,
+       data = bay_tract_2018_mr)
+
+model3 <- 
+  lm(percent_super_commuters ~ 
+       percent_over100k + 
+       percent_female_workers +
+       percent_using_public_transit,
+      data = bay_tract_2010_mr)
+
+```
+
+```{r reg models, results='asis', message = F}
+# Regression Output
+stargazer(model1, model2, model3, type="html",
+          title="Table 3: Regression Results",
+          dep.var.caption = "",
+          covariate.labels=c("Personal Income (Thousands of Dollars)", 
+                             "Uses Public Transportation", 
+                              "Female",
+                              "% Households Making Over 100K Annually",
+                              "% Households with Female Workers",
+                              "% Households Using Public Transit to Commute"),
+          dep.var.labels=c("Commute to Work (Min.)", "% of Super-Commuters"),
+          single.row=T)
+
+```
+
+
+
+**Discussion of Model Results**
+
+In Model 1, all three predictors have a statistically significant relationship to the time commuting to work. The coefficient for income is positive, which runs counter to the prior literature that finds a negative relationship between income and commuting. However, the magnitude of the coefficient is quite small in magnitude. As a $10,000 increase in personal income is associated with a 17 minute increase in commute time, controlling for sex and mode of transportation. 
+**More noteworthy, people using public transportation have a work commute that is 21 minutes longer than people not using public transportation, net of gender and income.** This seems not only statistically significant, but also substantively significant.
+Female workers had a commute that is 2 minutes shorter than males, controlling for income and mode of transportation. **Although sex is statistically significant, it is not substantively significant.** The large sample size is probably driving statistical significance here. 
+
+Models 2 and 3 shows results at the household level predicting the percent of super commuters in the Bay Area census tracts. There are some different patterns in these models compared to model 1 and to each other. 
+**Unlike Model 1, both models 2 and 3, show a negative relationship between affluent households and the share of super-commuters.** The magnitude of the coefficient is similar between models 1 and 2, but the magnitude is lower for model 3, which is the 2010 data. Therefore, the negative relationship has increased somewhat overtime, meaning that super-commuting is becoming even less of an affluent phenomenon and more of a lower and middle income phenomenon for households in the Bay. 
+* The share of female workers is not statistically significant in model 2 and weakly significant in model 3. **The magnitude of the coefficient is small, suggesting that the relationship between gender and commuting is weaker in the Bay than the literature has suggested.** 
+* Using public Transportation is negatively associated with the share of super commuters, and this relationship was significant in 2010, but not 2018. This indicates that public transportation was associated with lower proportions of super-commuters in neighborhoods in 2010, but in 2018 there was no relationship. 
+
+
+**Conclusions**
+
+* **Causal arguments cannot be made from these analyses. These regression models show correlations between independent and dependent variables.** There are many omitted variables from this model, like land-use, occupation, and distance to workplace, that also influence commuting. Consequently, the models suffer from omitted variable bias. In addition, we are missing a some sort of change or initiative that would serve as "treatment" that we could evaluate pre- and post- changes in commuting patterns for people of different income levels.
+  + I cannot make claims like, lower income people have longer commute times because they cannot afford housing near work, or that taking public transportation is a financial necessity and not a lifestyle choice. 
+* One finding that stands out in this high-level analysis is that the individual-level data show a different relationship than the household level data, which is the type of data prior research has relied upon. **Under the individual-level data, there is some evidence that income may not be tightly coupled with super-commuting.** 
+* Future analyses should incorporate **geographic and lifestyle variables** to more clearly capture the relationship between commuting/super-commuting and demographic characteristics, and tease out whether super-commuting is a product of economic-circumstances or lifestyle choices.
+
